@@ -1,61 +1,56 @@
-# Stage 1: Build
 FROM python:3.10-slim as builder
 
+WORKDIR /app/data
+
+RUN pip install --no-cache-dir gdown
+
+RUN gdown 124t_JEyiavo_qYcFj6iSKVudMm268brG -O TCPFormer_ap3d_81.pth.tr
+RUN gdown 1_EjMWL9Rd9hPXaSahzShxm1-Ud2f4o5r -O train.pkl
+# RUN gdown 1LuhnQabwXBOzAeRkODJYxr9drf85MJSp -O yolov8n.pt
+
+FROM runpod/pytorch:1.0.3-cu1281-torch280-ubuntu2404
+
 WORKDIR /app
 
-# Install system dependencies for OpenCV and MediaPipe
+# Environment
+ENV PYTHONUNBUFFERED=1
+ENV VLM_API_URL="http://localhost:8000"
+
+# Install runtime system dependencies (kept together for single layer)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
+    libgl1 \
+    libglx-mesa0 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    zstd \
+    curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy only requirements first to leverage Docker cache for deps
 COPY requirements.txt ./
 
-# Install Python dependencies using requirements.txt
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Stage 2: Runtime
-FROM python:3.10-slim
+# Copy small application files (keep large model weights last to avoid cache invalidation)
+COPY start.sh local_pose_3d_server.py tcpformer_model.py ./
 
-WORKDIR /app
+# Prepare runtime directories and permissions
+RUN mkdir -p /app/videos && chmod +x /app/start.sh
 
-# Install runtime system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+# Copy large model weight last (minimize rebuilds of earlier layers)
+COPY --from=builder /app/data/* ./
 
-# Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
-
-# Copy application code and model weights
-COPY local_pose_3d_server.py ./
-COPY tcpformer_model.py ./
-COPY TCPFormer_ap3d_81.pth.tr ./
-
-# Create directory for temporary video files
-RUN mkdir -p /app/videos
-
-# Expose port
+# Expose ports (optional, services communicate via localhost inside container)
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/', timeout=5)"
 
-# Environment variables
-ENV PYTHONUNBUFFERED=1
-ENV VLM_API_URL=""
-
-# Run the server
-CMD ["python", "local_pose_3d_server.py"]
+# Start script
+CMD ["/bin/bash", "./start.sh"]
